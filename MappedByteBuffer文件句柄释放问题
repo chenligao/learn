@@ -1,0 +1,48 @@
+ MappedByteBuffer文件句柄释放问题
+问题描述
+
+现在很多java代码中都会用到内存映射的概念。文件映射的方式比输入输出流的方式快很多。但是在使用的过程中，正常地调用了FileChannel的force和close方法后，重命名文件或删除文件还会失败。主要原因还是文件的句柄没有释放。
+问题分析及解决
+
+文件句柄如果被持有，就相当于jvm虚拟机中有一个指向文件的指针，所以重命名文件和删除文件都会导致失败。而MappedByteBuffer没有提供unmap方法，且JDK中关于这个unmap方法的bug一直处于开放状态。在网上查找说的最多的就是利用反射调用FileChannelImpl的unmap方法释放内存：
+
+    private static void unmap(MappedByteBuffer var0) {
+        Cleaner var1 = ((DirectBuffer)var0).cleaner();
+        if (var1 != null) {
+            var1.clean();
+        }
+    }
+
+反射调用的代码不在写了。而且亲自测试了的确可以保证文件的删除。
+利用反射调用的原因是这个方法时私有静态的。但是换一个思路，既然已经知道了内部代码的实现，不如自己写一个unmap方法将内部的代码copy出来不是更好吗？所以
+
+private void unmap(MappedByteBuffer var0) {
+        Cleaner var1 = ((DirectBuffer)var0).cleaner();
+        if (var1 != null) {
+            var1.clean();
+        }
+    }
+
+在调用buffer的force方法后，再调用该unmap方法，就可以重命名文件了。
+
+File file = new File(rootPath + fileNum + ".txt");
+RandomAccessFile raf = new RandomAccessFile(file,"rw");
+FileChannel channel = raf.getChannel();
+MappedByteBuffer buffer = channel.map(FileChannel.MapMode.READ_WRITE,0L,numCount * 4);
+buffer.force();
+channel.force(true);
+channel.close();
+raf.close();
+unmap(buffer)
+
+可以使用rename()方法测试，文件是否被占用
+
+file.rename(file)
+
+返回true重命名成功，返回false文件重命名失败。
+特殊情况
+
+如果buffer的容量不够用时，需要用channel.map()重新生成一个MappedByteBuffer对象，在映射新buffer之前应该先调用buffer.force()方法和unmap(buffer) 两个方法。否则文件还是不能进行重命名和删除操作。原因应该是原来存在堆中的buffer对象没有被回收，而且还在持有文件的句柄。
+ 
+ 
+ 文章来源：https://www.cnblogs.com/arax/p/8011156.html
